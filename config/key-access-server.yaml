@@ -1,0 +1,31 @@
+# Key Access Server Configuration - Docker Deployment
+
+service:
+  name: key-access-server
+  version: 1.0.0
+  environment: development
+
+server:
+  host: 0.0.0.0
+  port: 50053
+
+services:
+  key_manager:
+    address: key-manager:50052
+    timeout: 30s
+  platform:
+    address: platform:50051
+    timeout: 30s
+
+encryption:
+  algorithm: RSA2048
+
+oidc:
+  enabled: true
+  issuer_url: http://keycloak:8080/realms/stratium
+  allow_insecure_issuer: true  # Keycloak advertises localhost as issuer inside the realm export
+  client_id: stratium-key-access
+  client_secret: stratium-key-manager-secret  # Override via STRATIUM_OIDC_CLIENT_SECRET
+  scopes:
+    - openid
+    - profile

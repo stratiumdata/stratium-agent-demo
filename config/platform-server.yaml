@@ -1,0 +1,27 @@
+# Platform Server Configuration - Docker Deployment
+
+service:
+  name: platform-server
+  version: 1.0.0
+  environment: development
+
+server:
+  host: 0.0.0.0
+  port: 50051
+
+database:
+  driver: postgres
+  host: postgres
+  port: 5432
+  database: stratium_pap
+  user: stratium
+  password: stratium  # Override via STRATIUM_DATABASE_PASSWORD
+  sslmode: disable
+  max_open_conns: 50
+  max_idle_conns: 10
+  conn_max_lifetime: 30m
+  conn_max_idle_time: 10m
+
+encryption:
+  algorithm: RSA2048
+  key_rotation: false

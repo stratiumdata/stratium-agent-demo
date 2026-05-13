@@ -1,0 +1,246 @@
+services:
+  # PostgreSQL database for Keycloak and PAP
+  postgres:
+    image: postgres:15-alpine
+    container_name: stratium-postgres
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-keycloak_password}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/01-init-multiple-dbs.sql:/docker-entrypoint-initdb.d/01-init-multiple-dbs.sql:ro
+      - ./postgres/02-init-pap.sql:/docker-entrypoint-initdb.d/02-init-pap.sql:ro
+      - ./postgres/03-init-keymanager.sql:/docker-entrypoint-initdb.d/03-init-keymanager.sql:ro
+      - ./postgres/04-init-agent-auth.sql:/docker-entrypoint-initdb.d/04-init-agent-auth.sql:ro
+      - ./postgres/05-init-demo-agents.sql:/docker-entrypoint-initdb.d/05-init-demo-agents.sql:ro
+    networks:
+      - stratium-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Keycloak OIDC Provider
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0
+    container_name: stratium-keycloak
+    command:
+      - start-dev
+      - --import-realm
+      - --http-enabled=true
+      - --hostname-strict=false
+      - --hostname-strict-https=false
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-keycloak_password}
+      # Hostname configuration for dual access (localhost + Docker network)
+      # Use localhost as the canonical hostname so tokens work from both internal and external
+      KC_HOSTNAME: ${KC_HOSTNAME:-localhost}
+      KC_HOSTNAME_PORT: ${KC_HOSTNAME_PORT:-8080}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HOSTNAME_STRICT_BACKCHANNEL: "false"
+      # Allow Keycloak to advertise localhost for frontend URLs but keycloak for backend
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_RELATIVE_PATH: /
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+    ports:
+      - "${KEYCLOAK_PORT:-8080}:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+      - ./keycloak/stratium-login:/opt/keycloak/themes/stratium-login
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - stratium-network
+    healthcheck:
+      test: [ "CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && timeout 2 cat <&3 | grep -q 'status.*UP'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+
+  # Platform Service
+  platform:
+    image: stratiumdata/platform:eval-1.0.5
+    container_name: stratium-platform
+    ports:
+      - "50051:50051"
+    environment:
+      # Database password (override via config)
+      - STRATIUM_DATABASE_PASSWORD=stratium
+    volumes:
+      # Mount configuration file
+      - ./config/platform-server.yaml:/etc/stratium/stratium.yaml:ro
+    networks:
+      - stratium-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Key Manager Service
+  key-manager:
+    image: stratiumdata/key-manager:eval-1.0.5
+    container_name: stratium-key-manager
+    ports:
+      - "50052:50052"
+    environment:
+      # Database password
+      - STRATIUM_DATABASE_PASSWORD=stratium
+      # OIDC client secret
+      - STRATIUM_OIDC_CLIENT_SECRET=${OIDC_KEY_MANAGER_CLIENT_SECRET:-stratium-key-manager-secret}
+      # Optional: Direct admin key (development only - NOT recommended for production)
+      - STRATIUM_ADMIN_KEY=${STRATIUM_ADMIN_KEY:-}
+    volumes:
+      # Mount configuration file
+      - ./config/key-manager.yaml:/etc/stratium/stratium.yaml:ro
+      # Mount volume for admin key persistence
+      - ~/.stratium/admin-key:/var/run/secrets/stratium/admin-key:ro
+    networks:
+      - stratium-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Key Access Service
+  key-access:
+    image: stratiumdata/key-access:eval-1.0.5
+    container_name: stratium-key-access
+    ports:
+      - "50053:50053"
+    environment:
+      # OIDC client secret
+      - STRATIUM_OIDC_CLIENT_SECRET=${OIDC_KEY_ACCESS_CLIENT_SECRET:-stratium-key-manager-secret}
+    volumes:
+      # Mount configuration file
+      - ./config/key-access-server.yaml:/etc/stratium/stratium.yaml:ro
+    networks:
+      - stratium-network
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Agent Gateway Service (Agent Authorization)
+  # Mints scoped delegation tokens for AI agents and proxies their calls
+  # through to platform / key-manager / key-access with the delegated identity.
+  agent-gateway:
+    image: ${AGENT_GATEWAY_IMAGE:-stratiumdata/agent-gateway:eval-1.0.8}
+    container_name: stratium-agent-gateway
+    ports:
+      - "50054:50054"
+    environment:
+      - STRATIUM_DATABASE_PASSWORD=stratium
+      - STRATIUM_OIDC_CLIENT_SECRET=${OIDC_AGENT_GATEWAY_CLIENT_SECRET:-stratium-agent-gateway-secret}
+      # Persistent HMAC key for signing delegation JWTs. If unset, server
+      # generates an ephemeral key per restart (demo OK, breaks token reuse).
+      - STRATIUM_AGENT_GATEWAY_DELEGATION_SIGNING_KEY=${AGENT_GATEWAY_SIGNING_KEY:-demo-signing-key-not-for-production}
+    volumes:
+      - ./config/agent-gateway-server.yaml:/etc/stratium/stratium.yaml:ro
+    networks:
+      - stratium-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      platform:
+        condition: service_started
+      key-manager:
+        condition: service_started
+      key-access:
+        condition: service_started
+    restart: unless-stopped
+
+  # Web UI
+  # Envoy proxy for gRPC-Web
+  envoy:
+    image: envoyproxy/envoy:v1.28-latest
+    container_name: stratium-envoy
+    ports:
+      - "8081:8081"  # gRPC-Web port
+      - "9901:9901"  # Admin port
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    networks:
+      - stratium-network
+    command: /usr/local/bin/envoy -c /etc/envoy/envoy.yaml
+    restart: unless-stopped
+
+  # AI Agent container — Anthropic Claude Code CLI
+  # Has the CLI installed plus a scripted delegation flow (/demo/flow.sh).
+  # Trigger via: make demo-flow-claude  (or `docker exec -it stratium-agent-claude-code /demo/flow.sh`)
+  agent-claude-code:
+    build:
+      context: .
+      dockerfile: agents/Dockerfile
+      args:
+        AGENT_PACKAGE: "@anthropic-ai/claude-code"
+        AGENT_NAME: "claude-code"
+    container_name: stratium-agent-claude-code
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}
+      - GATEWAY_ADDR=agent-gateway:50054
+      - KEYCLOAK_URL=http://keycloak:8080
+      - DEMO_USER=${DEMO_USER:-user}
+      - DEMO_PASS=${DEMO_PASS:-password123}
+    networks:
+      - stratium-network
+    depends_on:
+      agent-gateway:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # AI Agent container — OpenAI Codex CLI
+  agent-codex:
+    build:
+      context: .
+      dockerfile: agents/Dockerfile
+      args:
+        AGENT_PACKAGE: "@openai/codex"
+        AGENT_NAME: "codex"
+    container_name: stratium-agent-codex
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-}
+      - GATEWAY_ADDR=agent-gateway:50054
+      - KEYCLOAK_URL=http://keycloak:8080
+      - DEMO_USER=${DEMO_USER:-user}
+      - DEMO_PASS=${DEMO_PASS:-password123}
+    networks:
+      - stratium-network
+    depends_on:
+      agent-gateway:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  stratium-network:
+    driver: bridge
+    name: stratium-network
+
+volumes:
+  postgres_data:
+  key-manager-secrets:

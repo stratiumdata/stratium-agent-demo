@@ -1,0 +1,103 @@
+# Agent Gateway Server Configuration - Demo (plaintext, no TLS)
+#
+# The agent-gateway mints scoped delegation JWTs for AI agents acting on
+# behalf of users, then proxies their gRPC calls through to the platform,
+# key-manager, and key-access services with the delegated identity attached.
+
+service:
+  name: agent-gateway-server
+  version: 1.0.0
+  environment: demo
+
+server:
+  host: 0.0.0.0
+  port: 50054
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 300s
+  graceful_stop: 60s
+  tls:
+    enabled: false
+
+# Reuses the stratium_pap database (agents + delegations tables added by
+# postgres/04-init-agent-auth.sql).
+database:
+  driver: postgres
+  host: postgres
+  port: 5432
+  database: stratium_pap
+  user: stratium
+  password: stratium  # Override via STRATIUM_DATABASE_PASSWORD
+  sslmode: disable
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: 30m
+  conn_max_idle_time: 10m
+
+security:
+  rate_limiting:
+    enabled: false
+  cors:
+    enabled: false
+  fips:
+    enabled: false
+
+license:
+  enabled: false
+
+encryption:
+  algorithm: RSA2048
+  key_rotation: false
+
+logging:
+  level: info
+  format: json
+  output: stdout
+
+observability:
+  metrics:
+    enabled: true
+    address: ":9094"
+    path: /metrics
+  tracing:
+    enabled: false
+
+# OIDC validation of incoming end-user tokens before minting a delegation.
+oidc:
+  enabled: true
+  issuer_url: http://keycloak:8080/realms/stratium
+  allow_insecure_issuer: true
+  client_id: stratium-agent-gateway
+  client_secret: stratium-agent-gateway-secret  # Override via STRATIUM_OIDC_CLIENT_SECRET
+  scopes:
+    - openid
+    - profile
+
+# Agent-gateway specific knobs
+agent_gateway:
+  enabled: true
+  grpc_port: 50054
+  delegation_token_ttl: 15m
+  delegation_max_ttl: 1h
+  delegation_signing_key: ""  # Override via STRATIUM_AGENT_GATEWAY_DELEGATION_SIGNING_KEY
+  delegation_max_depth: 5
+  chain_cache_ttl: 30s
+  cascade_revoke: true
+
+# Downstream gRPC services on the stratium-network (all plaintext for the demo)
+services:
+  platform:
+    address: platform:50051
+    timeout: 10s
+    tls:
+      enabled: false
+  key_manager:
+    address: key-manager:50052
+    timeout: 10s
+    tls:
+      enabled: false
+  key_access:
+    address: key-access:50053
+    timeout: 10s
+    tls:
+      enabled: false

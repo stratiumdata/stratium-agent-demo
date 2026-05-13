@@ -1,0 +1,41 @@
+# Key Manager Service Configuration - Docker Deployment
+
+service:
+  name: key-manager
+  version: 1.0.0
+  environment: development
+
+server:
+  host: 0.0.0.0
+  port: 50052
+
+database:
+  driver: postgres
+  host: postgres
+  port: 5432
+  database: stratium_keymanager
+  user: stratium
+  password: stratium  # Override via STRATIUM_DATABASE_PASSWORD
+  sslmode: disable
+  max_open_conns: 50
+  max_idle_conns: 10
+  conn_max_lifetime: 30m
+  conn_max_idle_time: 10m
+
+encryption:
+  algorithm: RSA2048
+  key_rotation: false
+  admin_key_provider: composite
+  admin_key_config: /var/run/secrets/stratium/admin-key
+  admin_keys:
+    - admin
+
+oidc:
+  enabled: true
+  issuer_url: http://keycloak:8080/realms/stratium
+  allow_insecure_issuer: true  # Accept localhost issuer advertised by Keycloak realm export
+  client_id: stratium-key-manager
+  client_secret: stratium-key-manager-secret  # Override via STRATIUM_OIDC_CLIENT_SECRET
+  scopes:
+    - openid
+    - profile
